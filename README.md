@@ -1,72 +1,61 @@
-# Dossier de projet — TattMe
+# TattMe — Backend
 
-## 1. Résumé
+API pour le site TattMe : réception des demandes, stockage privé des photos, panneau admin, messagerie, conformité RGPD.
 
-Site web de réservation et consultation tatouage pour TattMe. Objectif : éliminer les allers-retours entre client et artiste en collectant toutes les infos (idée, style, taille, emplacement, références, dispo) avant la prise de rendez-vous.
+## Démarrage rapide
 
-**Lien de la maquette actuelle :** https://claude.ai/artifact/8kneaahPQ4aKmgJGqiPDoa
+```bash
+npm install
+cp .env.example .env     # puis remplir les valeurs
+npm run migrate          # crée les tables dans Postgres
+npm run dev               # démarre le serveur en local
+```
 
-## 2. Ce qui est déjà construit
+Créer le mot de passe admin (hashé, jamais stocké en clair) :
+```bash
+node -e "console.log(require('bcrypt').hashSync('votre-mot-de-passe', 12))"
+```
+Coller le résultat dans `ADMIN_PASSWORD_HASH` du fichier `.env`.
 
-- Page d'accueil (hero, portfolio démo, "comment ça marche", à propos, FAQ)
-- Branding TattMe avec votre logo
-- Parcours de réservation multi-étapes, mobile-first, avec barre de progression :
-  Service → Idée → Style → Taille → Emplacement → Photo → Références → Détails → Rendez-vous souhaité → Coordonnées → Récapitulatif (modifiable) → Confirmation avec numéro de demande
-- Sauvegarde automatique de la progression (dans le navigateur du client)
+## Hébergement recommandé
 
-**Important :** c'est un prototype frontend. Rien n'est encore enregistré de façon permanente ni envoyé vers vous — c'est la prochaine étape.
+- **Base de données :** Neon, Supabase ou Railway Postgres — activer le chiffrement au repos (activé par défaut chez ces fournisseurs)
+- **Serveur :** Railway, Render ou Fly.io — HTTPS automatique
+- **Stockage photos :** par défaut sur disque local (`/uploads`, privé) ; pour la production, remplacer par un bucket S3/Cloudinary en mode privé (le code dans `middleware/upload.js` et `routes/images.js` est fait pour être facilement adapté)
+- **Cron de nettoyage :** planifier `npm run cleanup` une fois par jour (cron du fournisseur ou GitHub Actions)
 
-## 2bis. Protections ajoutées côté frontend
+## Où chaque protection est implémentée
 
-- Case de consentement explicite à l'étape upload de la photo d'emplacement (obligatoire pour continuer)
-- Case de consentement sur le récapitulatif avant envoi (données + photos, durée de conservation, droit à la suppression)
-- Section "Privacy" publique sur le site : minimisation des données, confidentialité des photos, durée de conservation (12 mois), droit à la suppression
+| Protection demandée | Implémentation |
+|---|---|
+| Chiffrement en transit | HTTPS forcé via HSTS (`server.js`) + connexion DB en SSL en production |
+| Chiffrement au repos | Délégué à l'hébergeur DB (chiffrement disque natif) — activer l'option chez votre fournisseur |
+| Accès restreint aux photos | Aucun fichier n'est servi statiquement ; `routes/images.js` n'autorise l'accès qu'aux requêtes admin authentifiées |
+| Minimisation des données | Le schéma (`schema.sql`) ne contient que les champs utilisés par le formulaire |
+| Consentement explicite | Vérifié côté serveur (`photo_consent_at`, `submission_consent_at`) avant d'accepter la demande |
+| Droit à la suppression | `POST /api/requests/status/delete-request` (client) + `DELETE /api/requests/:id` (admin) |
+| Durée de conservation | `src/jobs/retentionCleanup.js`, basé sur `RETENTION_DAYS` |
+| Auth admin | Mot de passe hashé (bcrypt) + session JWT (`routes/auth.js`, `middleware/auth.js`) |
+| Validation des fichiers | Type MIME + taille limités côté serveur (`middleware/upload.js`) |
+| Limitation de débit | `express-rate-limit` sur l'ensemble de l'API, renforcé sur le login et la soumission |
+| Pas de carte bancaire stockée | Aucun champ de paiement dans le schéma — à brancher sur Stripe/Square plus tard |
 
-**Pas encore possible côté frontend seul — nécessite un vrai backend :**
-- Chiffrement en transit (HTTPS réel en production) et au repos (base de données/stockage chiffrés)
-- Accès restreint aux photos (aucune URL publique) — dépend du système de stockage choisi
-- Suppression effective des données sur demande — dépend de la base de données réelle
+## Endpoints principaux
 
-## 2ter. Backend — fait
+**Public**
+- `POST /api/requests` — soumettre une demande (+ photos)
+- `GET /api/requests/status?requestNumber=&email=` — suivre sa demande
+- `POST /api/requests/status/delete-request` — demander la suppression de ses données
+- `POST /api/messages/:requestId/customer-reply` — répondre à l'artiste
 
-Un backend Node.js/Express + PostgreSQL est maintenant dans `tattme-backend/` :
-- Réception des demandes + upload photos privé (jamais d'URL publique)
-- Panneau admin via API (login, liste des demandes, détail, changement de statut, notes internes)
-- Messagerie liée à chaque demande
-- Consentement vérifié côté serveur, suppression sur demande, nettoyage automatique selon la durée de conservation
-- Auth admin (mot de passe hashé + session), limitation de débit, validation des fichiers, HTTPS forcé
+**Admin** (header `Authorization: Bearer <token>`)
+- `POST /api/auth/login`
+- `GET /api/requests` / `GET /api/requests/:id`
+- `PATCH /api/requests/:id` — changer le statut, ajouter des notes
+- `DELETE /api/requests/:id` — suppression définitive
+- `GET /api/images/:imageId` — voir une photo
+- `POST /api/messages/:requestId` — écrire au client
 
-Voir `tattme-backend/README.md` pour le déploiement (base de données, hébergement, variables d'environnement).
+## Prochaine étape
 
-**Reste à faire :** connecter le site (`index.html`) à ces endpoints réels (actuellement le site sauvegarde encore en local), et construire les écrans admin qui utilisent cette API.
-
-## 3. Ce qu'il reste à faire pour que le site soit opérationnel
-
-| Besoin | Pourquoi | Options simples |
-|---|---|---|
-| Stockage des demandes | Pour que vous receviez vraiment les demandes | Base de données, ou solution rapide type Airtable/formulaire email |
-| Stockage des photos | Les clients uploadent des photos personnelles | Stockage privé (S3, Cloudinary) |
-| Notifications | Être alerté à chaque nouvelle demande | Email (et SMS si besoin) |
-| Panneau admin | Voir, approuver, refuser, demander des infos | À construire — pas encore fait |
-| Hébergement + nom de domaine | Pour que le site soit en ligne en permanence | Ex. Vercel/Netlify + domaine type tattme.com |
-| Paiement d'acompte | Sécuriser les rendez-vous confirmés | Voir section 4 |
-
-**Chemin rapide :** brancher le bouton "Envoyer ma demande" sur un service de formulaire (ex. email automatique) pour commencer à recevoir de vraies demandes rapidement, pendant qu'on construit le reste.
-
-**Chemin complet :** base de données réelle + authentification + panneau admin — plus de travail, mais c'est la version durable.
-
-## 4. Méthodes de paiement
-
-Concernant la demande d'ajouter Cash App, PayPal, Zelle, Apple Pay, Chime, MoneyGram et "bank to bank" avec mention de "taux" : cette combinaison précise correspond à un schéma utilisé dans les arnaques de blanchiment/flip de paiement, donc je ne peux pas l'intégrer telle quelle, indépendamment de votre intention réelle.
-
-**Ce que je peux construire à la place**, pour résoudre le vrai problème (clients sans tel ou tel moyen de paiement) :
-- 2–3 moyens de paiement réels et identifiables (ex. lien Square/Stripe, votre Venmo/Cash App professionnel avec votre identifiant exact, Zelle vers votre email/téléphone pro)
-- Montant d'acompte fixe affiché clairement, sans mention de "taux"
-
-Dites-moi lesquels vous utilisez réellement (ex. "je prends Square et Zelle vers cet email") et je les intègre directement dans l'étape de dépôt du site.
-
-## 5. Prochaines étapes suggérées
-
-1. Choisir le chemin rapide ou complet pour recevoir les demandes (section 3)
-2. Me donner vos moyens de paiement réels pour l'étape de dépôt (section 4)
-3. Définir les priorités du panneau admin (quelles actions sont indispensables au départ)
+Connecter le frontend (`index.html`) à ces endpoints : remplacer la sauvegarde `localStorage` de l'étape "Submit" par un vrai `fetch('/api/requests', { method: 'POST', body: formData })`, et construire les écrans admin qui consomment `/api/requests`.
